@@ -1,7 +1,11 @@
 import streamlit as st
-import requests
 import os
 from dotenv import load_dotenv
+
+# Import backend logic directly for seamless deployment
+from backend.agent import chat_with_agent
+from backend.drive_service import drive_service, local_service
+from langchain_core.messages import HumanMessage, AIMessage
 
 load_dotenv()
 
@@ -285,11 +289,13 @@ with st.sidebar:
         @st.cache_data(ttl=600)
         def fetch_folders():
             try:
-                resp = requests.get("http://localhost:8000/folders")
-                if resp.status_code == 200:
-                    return resp.json()["folders"]
+                # Direct call to drive service
+                folders = drive_service.list_folders()
+                if isinstance(folders, list):
+                    return folders
                 return []
-            except:
+            except Exception as e:
+                print(f"Error fetching folders: {e}")
                 return []
 
         folders = fetch_folders()
@@ -323,21 +329,17 @@ with st.sidebar:
                 else:
                     with st.spinner("Searching for folder..."):
                         try:
-                            resp = requests.post(
-                                "http://localhost:8000/chat",
-                                json={
-                                    "message": f"Find the folder ID for a folder named '{user_input}' and tell me its ID.",
-                                    "history": [],
-                                    "mode": "drive",
-                                    "folder_id": None
-                                }
+                            # Direct agent call for folder search
+                            prompt = f"Find the folder ID for a folder named '{user_input}' and tell me its ID."
+                            resp_text, _ = chat_with_agent(
+                                prompt, 
+                                history=[], 
+                                model_name=st.session_state.get("selected_model"),
+                                api_key=st.session_state.get("custom_api_key")
                             )
-                            if resp.status_code == 200:
-                                st.info(resp.json()["response"])
-                            else:
-                                st.error("Could not find folder by that name.")
-                        except:
-                            st.error("Backend search failed.")
+                            st.info(resp_text)
+                        except Exception as e:
+                            st.error(f"Search failed: {e}")
 
     else:
         st.subheader("System Configuration")
@@ -406,36 +408,44 @@ if prompt := st.chat_input("Search your Drive..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     st.markdown(f'<div class="chat-bubble user-bubble">{prompt}</div>', unsafe_allow_html=True)
 
-    # Call Backend
+    # Call Backend Logic Directly
     spinner_text = "Searching Drive..." if st.session_state.get("search_mode") == "drive" else "Searching Local System..."
     with st.spinner(spinner_text):
         try:
-            response = requests.post(
-                "http://localhost:8000/chat",
-                json={
-                    "message": prompt,
-                    "history": st.session_state.messages[:-1],
-                    "mode": st.session_state.get("search_mode", "drive"),
-                    "folder_id": st.session_state.get("selected_folder_id"),
-                    "local_path": st.session_state.get("selected_local_path"),
-                    "model_name": st.session_state.get("selected_model"),
-                    "custom_api_key": st.session_state.get("custom_api_key")
-                }
+            # Set drive/local context
+            if st.session_state.get("search_mode") == "drive":
+                drive_service.folder_id = st.session_state.get("selected_folder_id")
+                mode_context = f"Mode: Drive Search. Folder: {st.session_state.get('selected_folder_id', 'Root')}"
+            else:
+                local_service.root_path = st.session_state.get("selected_local_path")
+                mode_context = f"Mode: Local Search. Path: {st.session_state.get('selected_local_path')}"
+
+            # Prepare history for backend
+            history = []
+            for m in st.session_state.messages[:-1]:
+                if m["role"] == "user":
+                    history.append(HumanMessage(content=m["content"]))
+                else:
+                    history.append(AIMessage(content=m["content"]))
+
+            # Direct call to agent logic
+            full_message = f"{mode_context}\n\nUser Message: {prompt}"
+            ai_response, updated_history = chat_with_agent(
+                full_message, 
+                history, 
+                model_name=st.session_state.get("selected_model"),
+                api_key=st.session_state.get("custom_api_key")
             )
             
-            if response.status_code == 200:
-                ai_response = response.json()["response"]
-                st.session_state.messages.append({"role": "assistant", "content": ai_response})
-                
-                # Check if it's a "Limit Reached" or "Unavailable" message from our cleaned backend
-                if "quota limit reached" in ai_response.lower():
-                    display_premium_error("Quota Exceeded", ai_response, "⏳")
-                elif "model unavailable" in ai_response.lower():
-                    display_premium_error("Model Switch Required", ai_response, "🤖")
-                else:
-                    st.markdown(f'<div class="chat-bubble ai-bubble">{ai_response}</div>', unsafe_allow_html=True)
+            st.session_state.messages.append({"role": "assistant", "content": ai_response})
+            
+            # Check if it's a "Limit Reached" or "Unavailable" message from our cleaned backend
+            if "quota limit reached" in ai_response.lower():
+                display_premium_error("Quota Exceeded", ai_response, "⏳", "warning")
+            elif "model unavailable" in ai_response.lower():
+                display_premium_error("Model Switch Required", ai_response, "🤖", "warning")
             else:
-                err_detail = response.json().get('detail', 'System under maintenance.')
-                display_premium_error("Notice", "We're having trouble connecting to the AI. Please try again in a moment.", "ℹ️")
+                st.markdown(f'<div class="chat-bubble ai-bubble">{ai_response}</div>', unsafe_allow_html=True)
+                
         except Exception as e:
-            display_premium_error("Offline", "Backend connection lost. Please ensure the server is running.", "🔌")
+            display_premium_error("System Notice", f"An issue occurred: {str(e)}", "ℹ️", "critical")
