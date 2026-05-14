@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+
+# Environment and Secrets
+.env
+service_account.json
+
+# Scratch/Test files
+scratch/
+
+# IDEs
+.vscode/
+.idea/
